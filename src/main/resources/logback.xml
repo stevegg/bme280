@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!--
+        If we're local then the logs should go in a local path relative to
+        the build.
+        Otherwise if we're using the CTO container then the logs should be
+        in /usr/local/tomcat/logs
+        Otherwise logs will go in their traditional /app/log/tomcat-sbg-mumble
+        location
+    -->
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <layout class="ch.qos.logback.classic.PatternLayout">
+            <pattern>%d %-4relative [%thread] %-5level %class{0} %L requestId=%X{requestId} user=%X{user} API=%X{API} %msg%n
+            </pattern>
+        </layout>
+    </appender>
+    <root level="DEBUG">
+        <appender-ref ref="STDOUT"/>
+    </root>
+
+</configuration>

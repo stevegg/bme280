@@ -5,8 +5,13 @@ import com.pi4j.io.i2c.I2CDevice;
 import com.pi4j.io.i2c.I2CFactory;
 
 import com.pi4j.system.SystemInfo;
+import com.wellmadesoftware.bme280.utils.DBException;
 import com.wellmadesoftware.bme280.utils.EndianReaders;
+import com.wellmadesoftware.bme280.utils.RRDatabase;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.awt.*;
 import java.io.IOException;
 
 import java.text.DecimalFormat;
@@ -14,9 +19,13 @@ import java.text.NumberFormat;
 
 public class BME280 {
 
+	private static final Logger logger = LoggerFactory.getLogger(BME280.class);
+
 	private static final long SLEEP_TIME = 60000; // Amount of time in milliseconds to sleep between readings
 
-private final static EndianReaders.Endianness BME280_ENDIANNESS = EndianReaders.Endianness.LITTLE_ENDIAN;
+	private static final boolean verboseOutput = true;
+
+	private final static EndianReaders.Endianness BME280_ENDIANNESS = EndianReaders.Endianness.LITTLE_ENDIAN;
 	/*
 	Prompt> sudo i2cdetect -y 1
 			 0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
@@ -345,53 +354,61 @@ private final static EndianReaders.Endianness BME280_ENDIANNESS = EndianReaders.
 		float hum = 0;
 		double alt = 0;
 
+		logger.debug("Creating databases...");
+		RRDatabase temperature = new RRDatabase( "temp.rrd", "Temperature", -30.0, 40.0);
+		RRDatabase humidity = new RRDatabase( "hum.rrd", "Humidity", 0.0, 100.0);
 		while (true) {
 			try {
 				temp = sensor.readTemperature();
+				temperature.writeValue((double)temp);
 			} catch (Exception ex) {
 				System.err.println(ex.getMessage());
 				ex.printStackTrace();
 			}
+
 			try {
 				press = sensor.readPressure();
 			} catch (Exception ex) {
 				System.err.println(ex.getMessage());
 				ex.printStackTrace();
 			}
-		  /*
-		sensor.setStandardSeaLevelPressure((int)press); // As we ARE at the sea level (in San Francisco).
-		try { alt = sensor.readAltitude(); }
-		catch (Exception ex)
-		{
-		  System.err.println(ex.getMessage());
-		  ex.printStackTrace();
-		}
-		*/
+
 			try {
 				hum = sensor.readHumidity();
+				humidity.writeValue((double)hum);
 			} catch (Exception ex) {
 				System.err.println(ex.getMessage());
 				ex.printStackTrace();
 			}
 
-			System.out.println("Temperature: " + NF.format(temp) + " C");
-			System.out.println("Pressure   : " + NF.format(press / 100) + " hPa");
-			//  System.out.println("Altitude   : " + NF.format(alt) + " m");
-			System.out.println("Humidity   : " + NF.format(hum) + " %");
-			// Bonus : CPU Temperature
-			try {
-				System.out.println("CPU Temperature   :  " + SystemInfo.getCpuTemperature());
-				System.out.println("CPU Core Voltage  :  " + SystemInfo.getCpuVoltage());
-			} catch (InterruptedException ie) {
-				ie.printStackTrace();
-			} catch (IOException e) {
-				e.printStackTrace();
-			}
+			if ( verboseOutput ) {
+				System.out.println("Temperature: " + NF.format(temp) + " C");
+				System.out.println("Pressure   : " + NF.format(press / 100) + " hPa");
+				//  System.out.println("Altitude   : " + NF.format(alt) + " m");
+				System.out.println("Humidity   : " + NF.format(hum) + " %");
+				// Bonus : CPU Temperature
+				try {
+					System.out.println("CPU Temperature   :  " + SystemInfo.getCpuTemperature());
+					System.out.println("CPU Core Voltage  :  " + SystemInfo.getCpuVoltage());
+				} catch (InterruptedException ie) {
+					ie.printStackTrace();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
 
-			try {
-				Thread.sleep(SLEEP_TIME);
-			} catch (InterruptedException e) {
-				System.err.println(e.getMessage());
+				try {
+					// Create graphs
+					temperature.createGraphs("/var/www/html/graphs", new Color(0xff, 0, 0));
+					humidity.createGraphs("/var/www/html/graphs", new Color(0, 0xff, 0));
+				} catch (DBException e) {
+					e.printStackTrace();
+				}
+
+				try {
+					Thread.sleep(SLEEP_TIME);
+				} catch (InterruptedException e) {
+					System.err.println(e.getMessage());
+				}
 			}
 		}
 	}
