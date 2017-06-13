@@ -1,4 +1,4 @@
-package com.wellmadesoftware.bme280.utils;
+package com.wellmadesoftware.bme280.data.exception;
 
 /**
  * Created by sgoyette on 6/7/17.

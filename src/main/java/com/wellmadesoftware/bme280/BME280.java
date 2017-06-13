@@ -5,17 +5,33 @@ import com.pi4j.io.i2c.I2CDevice;
 import com.pi4j.io.i2c.I2CFactory;
 
 import com.pi4j.system.SystemInfo;
-import com.wellmadesoftware.bme280.utils.DBException;
+import com.wellmadesoftware.bme280.data.exception.DBException;
+import com.wellmadesoftware.bme280.data.model.AveragingMeasurement;
+import com.wellmadesoftware.bme280.data.model.Measurement;
+import com.wellmadesoftware.bme280.data.repository.MeasurementRepository;
+import com.wellmadesoftware.bme280.data.repository.MeasurementRepositoryImpl;
 import com.wellmadesoftware.bme280.utils.EndianReaders;
-import com.wellmadesoftware.bme280.utils.RRDatabase;
+import org.jfree.chart.ChartFactory;
+import org.jfree.chart.ChartUtilities;
+import org.jfree.chart.JFreeChart;
+import org.jfree.chart.plot.XYPlot;
+import org.jfree.data.time.Second;
+import org.jfree.data.time.TimeSeries;
+import org.jfree.data.time.TimeSeriesCollection;
+import org.jfree.data.xy.XYDataset;
+import org.jfree.ui.RectangleInsets;
+import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.awt.*;
+import java.io.File;
 import java.io.IOException;
 
 import java.text.DecimalFormat;
 import java.text.NumberFormat;
+import java.util.*;
+import java.util.List;
 
 public class BME280 {
 
@@ -349,67 +365,154 @@ public class BME280 {
 	public static void main(String[] args) throws I2CFactory.UnsupportedBusNumberException {
 		final NumberFormat NF = new DecimalFormat("##00.00");
 		BME280 sensor = new BME280();
-		float press = 0;
-		float temp = 0;
-		float hum = 0;
-		double alt = 0;
 
 		logger.debug("Creating databases...");
-		RRDatabase temperature = new RRDatabase( "temp.rrd", "Temperature", -30.0, 40.0);
-		RRDatabase humidity = new RRDatabase( "hum.rrd", "Humidity", 0.0, 100.0);
+		MeasurementRepository repository = new MeasurementRepositoryImpl();
+
 		while (true) {
+			Measurement measurement = new Measurement();
 			try {
-				temp = sensor.readTemperature();
-				temperature.writeValue((double)temp);
+				measurement.setTemperature(sensor.readTemperature());
 			} catch (Exception ex) {
-				System.err.println(ex.getMessage());
+				logger.error("Failed to read temperature : {}", ex.getMessage());
 				ex.printStackTrace();
 			}
 
 			try {
-				press = sensor.readPressure();
+				measurement.setPressure(sensor.readPressure());
 			} catch (Exception ex) {
-				System.err.println(ex.getMessage());
+				logger.error("Failed to read pressure : {}", ex.getMessage());
 				ex.printStackTrace();
 			}
 
 			try {
-				hum = sensor.readHumidity();
-				humidity.writeValue((double)hum);
+				measurement.setHumidity(sensor.readHumidity());
 			} catch (Exception ex) {
-				System.err.println(ex.getMessage());
+				logger.error("Failed to read humidity : {}", ex.getMessage());
 				ex.printStackTrace();
+			}
+
+			try {
+				measurement.setCpuTemp(SystemInfo.getCpuTemperature());
+				measurement.setCpuCoreVoltage(SystemInfo.getCpuVoltage());
+			} catch (InterruptedException | IOException ie) {
+				logger.error("Failed to read CPU Temperature/Voltage : {}", ie.getMessage());
+				ie.printStackTrace();
+			}
+
+			try {
+				repository.create(measurement);
+			} catch ( DBException ioe ) {
+				logger.error("Failed to write measurement...");
+				ioe.printStackTrace();
 			}
 
 			if ( verboseOutput ) {
-				System.out.println("Temperature: " + NF.format(temp) + " C");
-				System.out.println("Pressure   : " + NF.format(press / 100) + " hPa");
+				logger.debug("Temperature: {} C", NF.format(measurement.getTemperature()));
+				logger.debug("Pressure   : {} hpa", NF.format(measurement.getPressure() / 100));
 				//  System.out.println("Altitude   : " + NF.format(alt) + " m");
-				System.out.println("Humidity   : " + NF.format(hum) + " %");
+				logger.debug("Humidity   : {} %", NF.format(measurement.getHumidity()));
 				// Bonus : CPU Temperature
-				try {
-					System.out.println("CPU Temperature   :  " + SystemInfo.getCpuTemperature());
-					System.out.println("CPU Core Voltage  :  " + SystemInfo.getCpuVoltage());
-				} catch (InterruptedException ie) {
-					ie.printStackTrace();
-				} catch (IOException e) {
-					e.printStackTrace();
-				}
+				logger.debug("CPU Temperature   :  {}", measurement.getCpuTemp());
+				logger.debug("CPU Core Voltage  :  {}", measurement.getCpuCoreVoltage());
+			}
 
-				try {
-					// Create graphs
-					temperature.createGraphs("/var/www/html/graphs", new Color(0xff, 0, 0));
-					humidity.createGraphs("/var/www/html/graphs", new Color(0, 0xff, 0));
-				} catch (DBException e) {
-					e.printStackTrace();
-				}
+			try {
+				createCharts(repository);
+			} catch (IOException e) {
+				logger.error("Failed to create charts : {}", e.getMessage());
+				e.printStackTrace();
+			}
 
-				try {
-					Thread.sleep(SLEEP_TIME);
-				} catch (InterruptedException e) {
-					System.err.println(e.getMessage());
-				}
+
+			try {
+				Thread.sleep(SLEEP_TIME);
+			} catch (InterruptedException e) {
+				System.err.println(e.getMessage());
 			}
 		}
 	}
+
+	private static void createCharts( MeasurementRepository repository) throws IOException {
+
+		List<Measurement> data = repository.list(System.currentTimeMillis() - 3600000, System.currentTimeMillis());
+		createChart(data, "Last Hour", "hourly.jpg");
+
+		// Get data for the last 24 hours
+		data = repository.list(System.currentTimeMillis() - 86400000, System.currentTimeMillis());
+		// Now go through and summarize that data into hourly buckets
+		Map<String, AveragingMeasurement> hourBuckets = new HashMap<>(24);
+		DateTime current = new DateTime();
+		for ( int i = 0; i < 24; i ++ ) {
+
+			int currentHour = current.getHourOfDay();
+			int currentDay = current.getDayOfMonth();
+			int currentMonth = current.getMonthOfYear();
+			int currentYear = current.getYear();
+			String key = String.format("%d:%d:%d:%d", currentYear, currentMonth, currentDay, currentHour);
+			hourBuckets.put(key, new AveragingMeasurement());
+			current = current.minusHours(1);
+		}
+
+		for ( Measurement measurement : data ) {
+
+			current = new DateTime(measurement.getTimestamp());
+			int currentHour = current.getHourOfDay();
+			int currentDay = current.getDayOfMonth();
+			int currentMonth = current.getMonthOfYear();
+			int currentYear = current.getYear();
+			String key = String.format("%d:%d:%d:%d", currentYear, currentMonth, currentDay, currentHour);
+			AveragingMeasurement bucket = hourBuckets.get(key);
+			assert( bucket != null );
+
+			bucket.addTemperature(measurement.getTemperature());
+			bucket.addHumidity(measurement.getHumidity());
+			bucket.addPressure(measurement.getPressure());
+			bucket.addCpuTemp(measurement.getCpuTemp());
+			bucket.addCpuCoreVoltage(measurement.getCpuCoreVoltage());
+			bucket.incrementCount();
+		}
+
+		// Now use this to get the 24 hour chart
+		data = new ArrayList<>(24);
+		for ( String key : hourBuckets.keySet() ) {
+			data.add(hourBuckets.get(key));
+		}
+
+		createChart(data, "Last 24 Hours", "last24hours.jpg");
+	}
+
+	private static void createChart(List<Measurement> data, String title, String filename) throws IOException {
+
+		// Get data
+
+		final TimeSeries series = new TimeSeries( "Temperature" );
+		for ( Measurement measurement : data ) {
+			Second timestamp = new Second(new Date(measurement.getTimestamp()));
+			series.addOrUpdate(timestamp, measurement.getTemperature());
+		}
+		final XYDataset temperature=(XYDataset)new TimeSeriesCollection(series, TimeZone.getDefault());
+
+		JFreeChart timechart = ChartFactory.createTimeSeriesChart(
+				title,
+				"Timestamp",
+				"Value",
+				temperature,
+				false,
+				false,
+				false);
+
+		timechart.setBackgroundPaint(Color.white);
+		XYPlot plot = (XYPlot) timechart.getPlot();
+		plot.setBackgroundPaint(Color.lightGray);
+		plot.setDomainGridlinePaint(Color.white);
+		plot.setRangeGridlinePaint(Color.white);
+		plot.setAxisOffset(new RectangleInsets(5.0, 5.0, 5.0, 5.0));
+
+		int width = 640;   /* Width of the image */
+		int height = 480;  /* Height of the image */
+		File timeChart = new File( String.format("/var/www/html/graphs/%s", filename ));
+		ChartUtilities.saveChartAsJPEG( timeChart, timechart, width, height );
+	}
+
 }
