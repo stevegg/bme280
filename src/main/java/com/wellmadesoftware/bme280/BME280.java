@@ -1,5 +1,6 @@
 package com.wellmadesoftware.bme280;
 
+import com.google.gson.Gson;
 import com.pi4j.io.i2c.I2CBus;
 import com.pi4j.io.i2c.I2CDevice;
 import com.pi4j.io.i2c.I2CFactory;
@@ -11,15 +12,21 @@ import com.wellmadesoftware.bme280.data.model.Measurement;
 import com.wellmadesoftware.bme280.data.repository.MeasurementRepository;
 import com.wellmadesoftware.bme280.data.repository.MeasurementRepositoryImpl;
 import com.wellmadesoftware.bme280.utils.EndianReaders;
+import org.apache.commons.io.FileUtils;
 import org.jfree.chart.ChartFactory;
 import org.jfree.chart.ChartUtilities;
 import org.jfree.chart.JFreeChart;
+import org.jfree.chart.plot.Marker;
+import org.jfree.chart.plot.ValueMarker;
 import org.jfree.chart.plot.XYPlot;
 import org.jfree.data.time.Second;
 import org.jfree.data.time.TimeSeries;
 import org.jfree.data.time.TimeSeriesCollection;
 import org.jfree.data.xy.XYDataset;
+import org.jfree.data.xy.XYSeriesCollection;
+import org.jfree.ui.RectangleAnchor;
 import org.jfree.ui.RectangleInsets;
+import org.jfree.ui.TextAnchor;
 import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,7 +45,7 @@ public class BME280 {
 	private static final Logger logger = LoggerFactory.getLogger(BME280.class);
 
 	private static final long SLEEP_TIME = 60000; // Amount of time in milliseconds to sleep between readings
-
+    private static final String DATA_PATH = "/var/www/html/graphs";
 	private static final boolean verboseOutput = true;
 
 	private final static EndianReaders.Endianness BME280_ENDIANNESS = EndianReaders.Endianness.LITTLE_ENDIAN;
@@ -433,73 +440,100 @@ public class BME280 {
 		}
 	}
 
+	private static final long HOUR = 3600000;
+	private static final long DAY = HOUR * 24;
+	private static final long WEEK = DAY * 7;
+	private static final long MONTH = DAY * 30;
+
+	private static Gson gson = new Gson();
+
+	private static class HiLowAvg {
+	    public String title;
+	    public float hi = -100000.0f;
+	    public float low = 100000.0f;
+	    public float avg = 0.0f;
+	    public int count;
+
+	    public HiLowAvg(String title) {
+	        this.title = title;
+        }
+
+	    public void addValue(float value) {
+	        if ( value > hi ) {
+	            hi = value;
+            }
+            if ( value < low ) {
+	            low = value;
+            }
+            avg = ( ( avg * count ) + value ) / (count + 1);
+	        count ++;
+        }
+    }
+
 	private static void createCharts( MeasurementRepository repository) throws IOException {
 
-		List<Measurement> data = repository.list(System.currentTimeMillis() - 3600000, System.currentTimeMillis());
-		createChart(data, "Last Hour", "hourly.jpg");
+	    List<HiLowAvg> hiLowAvgList = new ArrayList<>();
+        HiLowAvg hourly = new HiLowAvg("hourly");
+        HiLowAvg daily = new HiLowAvg("daily");
+        HiLowAvg weekly = new HiLowAvg("weekly");
+        hiLowAvgList.add(hourly);
+        hiLowAvgList.add(daily);
+        hiLowAvgList.add(weekly);
+
+		List<Measurement> data = repository.list(System.currentTimeMillis() - HOUR, System.currentTimeMillis());
+		for ( Measurement measurement : data ) {
+            hourly.addValue(measurement.getTemperature());
+        }
+		createChart(data, "Last Hour", "hourly.jpg", hourly);
 
 		// Get data for the last 24 hours
-		data = repository.list(System.currentTimeMillis() - 86400000, System.currentTimeMillis());
-		// Now go through and summarize that data into hourly buckets
-		Map<String, AveragingMeasurement> hourBuckets = new HashMap<>(24);
-		DateTime current = new DateTime();
-		for ( int i = 0; i < 24; i ++ ) {
+		data = repository.list(System.currentTimeMillis() - DAY, System.currentTimeMillis());
+        for ( Measurement measurement : data ) {
+            daily.addValue(measurement.getTemperature());
+        }
+		createChart(data, "Last 24 Hours", "last24hours.jpg", daily);
 
-			int currentHour = current.getHourOfDay();
-			int currentDay = current.getDayOfMonth();
-			int currentMonth = current.getMonthOfYear();
-			int currentYear = current.getYear();
-			String key = String.format("%d:%d:%d:%d", currentYear, currentMonth, currentDay, currentHour);
-			hourBuckets.put(key, new AveragingMeasurement());
-			current = current.minusHours(1);
-		}
+		data = repository.list(System.currentTimeMillis() - WEEK, System.currentTimeMillis());
+        for ( Measurement measurement : data ) {
+            weekly.addValue(measurement.getTemperature());
+        }
+		createChart(data, "Last 7 Days", "lastweek.jpg", weekly);
 
-		for ( Measurement measurement : data ) {
+        // Now output values to a JSON file
+        String json = gson.toJson(hiLowAvgList);
+        FileUtils.writeStringToFile(new File(String.format("%s/measurements.json", DATA_PATH)), json, "UTF-8");
 
-			current = new DateTime(measurement.getTimestamp());
-			int currentHour = current.getHourOfDay();
-			int currentDay = current.getDayOfMonth();
-			int currentMonth = current.getMonthOfYear();
-			int currentYear = current.getYear();
-			String key = String.format("%d:%d:%d:%d", currentYear, currentMonth, currentDay, currentHour);
-			AveragingMeasurement bucket = hourBuckets.get(key);
-			assert( bucket != null );
-
-			bucket.addTemperature(measurement.getTemperature());
-			bucket.addHumidity(measurement.getHumidity());
-			bucket.addPressure(measurement.getPressure());
-			bucket.addCpuTemp(measurement.getCpuTemp());
-			bucket.addCpuCoreVoltage(measurement.getCpuCoreVoltage());
-			bucket.incrementCount();
-		}
-
-		// Now use this to get the 24 hour chart
-		data = new ArrayList<>(24);
-		for ( String key : hourBuckets.keySet() ) {
-			data.add(hourBuckets.get(key));
-		}
-
-		createChart(data, "Last 24 Hours", "last24hours.jpg");
 	}
 
-	private static void createChart(List<Measurement> data, String title, String filename) throws IOException {
+	private static void createChart(List<Measurement> data, String title, String filename, HiLowAvg hiLowAvg) throws IOException {
 
 		// Get data
 
-		final TimeSeries series = new TimeSeries( "Temperature" );
-		for ( Measurement measurement : data ) {
+		final TimeSeries temperatureSeries = new TimeSeries( "Temperature" );
+        final TimeSeries humiditySeries = new TimeSeries("Humidity" );
+        final TimeSeries pressureSeries = new TimeSeries( "Barometric Pressure");
+        final TimeSeries cpuVoltageSeries = new TimeSeries( "CPU Voltage" );
+        final TimeSeries cpuTemperatureSeries = new TimeSeries( "CPU Temperature" );
+        for ( Measurement measurement : data ) {
 			Second timestamp = new Second(new Date(measurement.getTimestamp()));
-			series.addOrUpdate(timestamp, measurement.getTemperature());
+			temperatureSeries.addOrUpdate(timestamp, measurement.getTemperature());
+			//humiditySeries.addOrUpdate(timestamp, measurement.getHumidity());
+			//pressureSeries.addOrUpdate(timestamp, measurement.getPressure());
+			//cpuVoltageSeries.addOrUpdate(timestamp, measurement.getCpuCoreVoltage());
+			cpuTemperatureSeries.addOrUpdate(timestamp, measurement.getCpuTemp());
 		}
-		final XYDataset temperature=(XYDataset)new TimeSeriesCollection(series, TimeZone.getDefault());
+
+		final TimeSeriesCollection timeSeriesCollection = new TimeSeriesCollection(temperatureSeries, TimeZone.getDefault());
+        //timeSeriesCollection.addSeries(humiditySeries);
+        //timeSeriesCollection.addSeries(cpuTemperatureSeries);
 
 		JFreeChart timechart = ChartFactory.createTimeSeriesChart(
 				title,
 				"Timestamp",
-				"Value",
-				temperature,
+				"Measurement",
+				timeSeriesCollection,
 				false,
-				false,
+				true,
 				false);
 
 		timechart.setBackgroundPaint(Color.white);
@@ -509,9 +543,34 @@ public class BME280 {
 		plot.setRangeGridlinePaint(Color.white);
 		plot.setAxisOffset(new RectangleInsets(5.0, 5.0, 5.0, 5.0));
 
-		int width = 640;   /* Width of the image */
-		int height = 480;  /* Height of the image */
-		File timeChart = new File( String.format("/var/www/html/graphs/%s", filename ));
+		Font markerFont = new Font("Helvetica", Font.BOLD, 18);
+        final Marker hiMarker = new ValueMarker(hiLowAvg.hi);
+        hiMarker.setPaint(Color.black);
+        hiMarker.setLabel("Hi Temp : " + String.format("%.2f C", hiLowAvg.hi));
+        hiMarker.setLabelAnchor(RectangleAnchor.BOTTOM_LEFT);
+        hiMarker.setLabelTextAnchor(TextAnchor.TOP_LEFT);
+        hiMarker.setLabelFont(markerFont);
+        plot.addRangeMarker(hiMarker);
+
+        final Marker lowMarker = new ValueMarker(hiLowAvg.low);
+        lowMarker.setPaint(Color.black);
+        lowMarker.setLabel("Low Temp: " + String.format("%.2f C", hiLowAvg.low));
+        lowMarker.setLabelAnchor(RectangleAnchor.BOTTOM_LEFT);
+        lowMarker.setLabelTextAnchor(TextAnchor.TOP_LEFT);
+        lowMarker.setLabelFont(markerFont);
+        plot.addRangeMarker(lowMarker);
+
+        final Marker avgMarker = new ValueMarker(hiLowAvg.avg);
+        avgMarker.setPaint(Color.black);
+        avgMarker.setLabel("Average Temp: " + String.format("%.2f C", hiLowAvg.avg));
+        avgMarker.setLabelAnchor(RectangleAnchor.BOTTOM_LEFT);
+        avgMarker.setLabelTextAnchor(TextAnchor.TOP_LEFT);
+        avgMarker.setLabelFont(markerFont);
+        plot.addRangeMarker(avgMarker);
+
+        int width = 1024;   /* Width of the image */
+		int height = 768;  /* Height of the image */
+		File timeChart = new File( String.format("%s/%s", DATA_PATH, filename ));
 		ChartUtilities.saveChartAsJPEG( timeChart, timechart, width, height );
 	}
 

@@ -1,0 +1,4 @@
+#!/bin/sh
+
+mvn clean install
+scp target/bme280-1.0-SNAPSHOT-jar-with-dependencies.jar sgoyette@192.168.1.230:/home/sgoyette/bme280.jar
